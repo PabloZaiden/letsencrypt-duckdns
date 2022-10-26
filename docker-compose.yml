@@ -1,0 +1,18 @@
+version: '2.4'
+
+services:
+  letsencrypt:
+    build: .
+    container_name: letsencrypt
+    volumes:
+      - ./certs:/etc/letsencrypt
+    environment:
+      - DUCKDNS_TOKEN=XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+      - DUCKDNS_DOMAIN=xyz.duckdns.org
+      - LETSENCRYPT_DOMAIN=xyz.duckdns.org
+      - LETSENCRYPT_WILDCARD=false #optional
+      - LETSENCRYPT_EMAIL=your@email.com #optional
+      - TESTING=false #optional
+      - UID=1000 #optional
+      - GID=1000 #optional
+    restart: unless-stopped
