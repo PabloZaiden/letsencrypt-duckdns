@@ -110,11 +110,11 @@ while :; do
   if [ ! -z "$KUBERNETES_SECRET" ]; then
     echo "INFO: Updating Kubernetes secret $KUBERNETES_SECRET"
 
-    kubectl create secret tls $KUBERNETES_SECRET \
+    ./kubectl create secret tls $KUBERNETES_SECRET \
       --save-config \
       --cert="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/fullchain.pem" \
       --key="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/privkey.pem" \
-      --dry-run -o yaml | kubectl apply -f -
+      --dry-run -o yaml | ./kubectl apply -f -
   fi
 
   # Wait for a random period within the next 12 hours
