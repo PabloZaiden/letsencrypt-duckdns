@@ -11,6 +11,10 @@ if [ -z "$DUCKDNS_DOMAIN" ]; then
   exit 1
 fi
 
+if [ ! -z "$KUBERNETES_SECRET" ]; then
+  echo "INFO: Running in Kubernetes. Will attempt to update cluster secret $KUBERNETES_SECRET"
+fi
+
 # Print email notice if applicable
 if [ -z "$LETSENCRYPT_EMAIL" ]; then
   echo "WARNING: You will not receive SSL certificate expiration notices"
@@ -57,6 +61,7 @@ echo "LETSENCRYPT_CHAIN: $LETSENCRYPT_CHAIN"
 echo "TESTING: $TESTING"
 echo "UID: $UID"
 echo "GID: $GID"
+echo "KUBERNETES_SECRET: $KUBERNETES_SECRET"
 
 if [ -z "$LETSENCRYPT_EMAIL" ]; then
   EMAIL_PARAM="--register-unsafely-without-email"
@@ -102,6 +107,16 @@ fi
 
 # Check if certificates require renewal twice a day
 while :; do
+  if [ ! -z "$KUBERNETES_SECRET" ]; then
+    echo "INFO: Updating Kubernetes secret $KUBERNETES_SECRET"
+
+    kubectl create secret tls $KUBERNETES_SECRET \
+      --save-config \
+      --cert="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/fullchain.pem" \
+      --key="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/privkey.pem" \
+      --dry-run -o yaml | kubectl apply -f -
+  fi
+
   # Wait for a random period within the next 12 hours
   LETSENCRYPT_DELAY=$(shuf -i 1-720 -n 1)
   echo "Sleeping for $(($LETSENCRYPT_DELAY / 60)) hour(s) and $(($LETSENCRYPT_DELAY % 60)) minute(s)"
