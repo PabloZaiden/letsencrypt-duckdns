@@ -114,7 +114,7 @@ while :; do
       --save-config \
       --cert="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/fullchain.pem" \
       --key="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/privkey.pem" \
-      --dry-run -o yaml | ./kubectl apply -f -
+      --dry-run=client -o yaml | ./kubectl apply -f -
   fi
 
   # Wait for a random period within the next 12 hours
@@ -123,6 +123,6 @@ while :; do
   sleep $((${LETSENCRYPT_DELAY} * 60)) # Convert to seconds
 
   echo "INFO: Attempting SSL certificate renewal"
-  certbot --manual-public-ip-logging-ok renew
+  certbot renew
   chown -R $UID:$GID /etc/letsencrypt
 done
