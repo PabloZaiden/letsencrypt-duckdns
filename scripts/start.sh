@@ -1,128 +1,117 @@
-#!/bin/sh
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-# Check variables DUCKDNS_TOKEN, DUCKDNS_DOMAIN
-if [ -z "$DUCKDNS_TOKEN" ] || [ "$DUCKDNS_TOKEN" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" ]; then
-  echo "ERROR: Variable DUCKDNS_TOKEN is unset or still its default value"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+DNS_PROVIDER="${DNS_PROVIDER:-duckdns}"
+CONFIG_DIR="${LETSENCRYPT_CONFIG_DIR:-/etc/letsencrypt}"
+if [ "${TESTING:-false}" = true ]; then
+  # Staging must never replace a production certificate in persisted storage.
+  CONFIG_DIR="$CONFIG_DIR/staging"
+fi
+KUBECTL="${KUBECTL:-$SCRIPT_DIR/kubectl}"
+OWNER_UID="$(printenv UID || printf '0')"
+OWNER_GID="${GID:-0}"
+
+fail() {
+  echo "ERROR: $*" >&2
   exit 1
+}
+
+case "$DNS_PROVIDER" in
+  duckdns)
+    [ -n "${DUCKDNS_TOKEN:-}" ] &&
+      [ "$DUCKDNS_TOKEN" != "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX" ] ||
+      fail "DUCKDNS_TOKEN is required"
+    [ -n "${DUCKDNS_DOMAIN:-}" ] || fail "DUCKDNS_DOMAIN is required"
+    DOMAIN="${LETSENCRYPT_DOMAIN:-$DUCKDNS_DOMAIN}"
+    AUTH_ARGS=(--manual --preferred-challenges dns
+      --manual-auth-hook "$SCRIPT_DIR/auth.sh"
+      --manual-cleanup-hook "$SCRIPT_DIR/cleanup.sh")
+    ;;
+  cloudflare)
+    [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || fail "CLOUDFLARE_API_TOKEN is required"
+    [ -n "${LETSENCRYPT_DOMAIN:-}" ] || fail "LETSENCRYPT_DOMAIN is required"
+    DOMAIN="$LETSENCRYPT_DOMAIN"
+    PROPAGATION_SECONDS="${CLOUDFLARE_PROPAGATION_SECONDS:-60}"
+    [[ "$PROPAGATION_SECONDS" =~ ^[0-9]+$ ]] ||
+      fail "CLOUDFLARE_PROPAGATION_SECONDS must be a non-negative integer"
+    AUTH_ARGS=(--dns-cloudflare
+      --dns-cloudflare-credentials "$CONFIG_DIR/cloudflare.ini"
+      --dns-cloudflare-propagation-seconds "$PROPAGATION_SECONDS")
+    ;;
+  *)
+    fail "Unsupported DNS_PROVIDER: $DNS_PROVIDER"
+    ;;
+esac
+
+[[ "$DOMAIN" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$ ]] ||
+  fail "LETSENCRYPT_DOMAIN must be a base domain without wildcards"
+if [ "$DNS_PROVIDER" = cloudflare ] &&
+   [[ "$DOMAIN" = duckdns.org || "$DOMAIN" = *.duckdns.org ]]; then
+  fail "Cloudflare cannot manage a DuckDNS domain"
 fi
 
-if [ -z "$DUCKDNS_DOMAIN" ]; then
-  echo "ERROR: Variable DUCKDNS_DOMAIN is unset or still its default value"
-  exit 1
+mkdir -p "$CONFIG_DIR"
+
+if [ "$DNS_PROVIDER" = cloudflare ]; then
+  (
+    umask 077
+    printf 'dns_cloudflare_api_token = %s\n' "$CLOUDFLARE_API_TOKEN" > "$CONFIG_DIR/cloudflare.ini"
+    chmod 600 "$CONFIG_DIR/cloudflare.ini"
+  )
 fi
 
-if [ ! -z "$KUBERNETES_SECRET" ]; then
-  echo "INFO: Running in Kubernetes. Will attempt to update cluster secret $KUBERNETES_SECRET"
-fi
-
-# Print email notice if applicable
-if [ -z "$LETSENCRYPT_EMAIL" ]; then
-  echo "WARNING: You will not receive SSL certificate expiration notices"
-fi
-
-# Set LETSENCRYPT_DOMAIN to DUCKDNS_DOMAIN if not specified
-if [ -z "$LETSENCRYPT_DOMAIN" ]; then
-  echo "INFO: LETSENCRYPT_DOMAIN is unset, using DUCKDNS_DOMAIN"
-  LETSENCRYPT_DOMAIN=$DUCKDNS_DOMAIN
-fi
-
-# Set certificate url based on LETSENCRYPT_WILDCARD value
-if [ "$LETSENCRYPT_WILDCARD" = "true" ]; then
-  echo "INFO: A wildcard SSL certificate will be created"
-  LETSENCRYPT_DOMAIN="*.$LETSENCRYPT_DOMAIN"
-else
-  LETSENCRYPT_WILDCARD="false"
-fi
-
-# Set default preferred chain if no value specified
-if [ -z "$LETSENCRYPT_CHAIN" ]; then
-  echo "INFO: LETSENCRYPT_CHAIN is unset, using default chain"
-  LETSENCRYPT_CHAIN="default"
-fi
-
-# Set user and group ID's for files
-if [ -z "$UID" ]; then
-  echo "INFO: No UID specified, using root UID of 0"
-  UID=0
-fi
-
-if [ -z "$GID" ]; then
-  echo "INFO: No GID specified, using root GID of 0"
-  GID=0
-fi
-
-# Print variables
-echo "DUCKDNS_TOKEN: $DUCKDNS_TOKEN"
-echo "DUCKDNS_DOMAIN: $DUCKDNS_DOMAIN"
-echo "LETSENCRYPT_DOMAIN: $LETSENCRYPT_DOMAIN"
-echo "LETSENCRYPT_EMAIL: $LETSENCRYPT_EMAIL"
-echo "LETSENCRYPT_WILDCARD: $LETSENCRYPT_WILDCARD"
-echo "LETSENCRYPT_CHAIN: $LETSENCRYPT_CHAIN"
-echo "TESTING: $TESTING"
-echo "UID: $UID"
-echo "GID: $GID"
-echo "KUBERNETES_SECRET: $KUBERNETES_SECRET"
-
-if [ -z "$LETSENCRYPT_EMAIL" ]; then
-  EMAIL_PARAM="--register-unsafely-without-email"
-else
-  EMAIL_PARAM="-m $LETSENCRYPT_EMAIL --no-eff-email"
-fi
-
-if [ "$LETSENCRYPT_CHAIN" = "default" ]; then
-  unset CHAIN_PARAM
-else
-  CHAIN_PARAM=( --preferred-chain "$LETSENCRYPT_CHAIN" )
-fi
-
-if [ "$TESTING" = "true" ]; then
-  echo "INFO: Generating staging certificate"
-  TEST_PARAM="--test-cert"
-else
-  unset TEST_PARAM
-fi
-
-echo "certbot certonly --manual --preferred-challenges dns \
-  --manual-auth-hook /scripts/auth.sh \
-  --manual-cleanup-hook /scripts/cleanup.sh \
-  ${CHAIN_PARAM[@]} $EMAIL_PARAM -d $LETSENCRYPT_DOMAIN \
-  --agree-tos --keep $TEST_PARAM"
-
-# Create certificates
-certbot certonly --manual --preferred-challenges dns \
-  --manual-auth-hook /scripts/auth.sh \
-  --manual-cleanup-hook /scripts/cleanup.sh \
-  "${CHAIN_PARAM[@]}" $EMAIL_PARAM -d $LETSENCRYPT_DOMAIN \
-  --agree-tos --keep $TEST_PARAM
-
-chown -R $UID:$GID /etc/letsencrypt
-
-# Check for successful certificate generation
-if [ ! -d "/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}" ] || \
-   [ ! -f "/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/fullchain.pem" ] || \
-   [ ! -f "/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/privkey.pem" ]; then
-  echo "ERROR: Failed to create SSL certificates"
-  exit 1
-fi
-
-# Check if certificates require renewal twice a day
-while :; do
-  if [ ! -z "$KUBERNETES_SECRET" ]; then
-    echo "INFO: Updating Kubernetes secret $KUBERNETES_SECRET"
-
-    ./kubectl create secret tls $KUBERNETES_SECRET \
-      --save-config \
-      --cert="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/fullchain.pem" \
-      --key="/etc/letsencrypt/live/${LETSENCRYPT_DOMAIN#\*\.}/privkey.pem" \
-      --dry-run=client -o yaml | ./kubectl apply -f -
+CERTBOT_ARGS=(--config-dir "$CONFIG_DIR" --non-interactive)
+DOMAIN_ARGS=(-d "$DOMAIN")
+if [ "${LETSENCRYPT_WILDCARD:-false}" = true ]; then
+  DOMAIN_ARGS=(-d "*.$DOMAIN")
+  # Preserve DuckDNS's wildcard-only behavior; Cloudflare also covers the base name.
+  if [ "$DNS_PROVIDER" = cloudflare ]; then
+    DOMAIN_ARGS+=(-d "$DOMAIN")
   fi
+fi
 
-  # Wait for a random period within the next 12 hours
-  LETSENCRYPT_DELAY=$(shuf -i 1-720 -n 1)
-  echo "Sleeping for $(($LETSENCRYPT_DELAY / 60)) hour(s) and $(($LETSENCRYPT_DELAY % 60)) minute(s)"
-  sleep $((${LETSENCRYPT_DELAY} * 60)) # Convert to seconds
+ISSUE_ARGS=(--cert-name "$DOMAIN" --agree-tos --keep-until-expiring)
+if [ -n "${LETSENCRYPT_EMAIL:-}" ]; then
+  ISSUE_ARGS+=(--email "$LETSENCRYPT_EMAIL")
+else
+  echo "WARNING: LETSENCRYPT_EMAIL is not set" >&2
+  ISSUE_ARGS+=(--register-unsafely-without-email)
+fi
+if [ -n "${LETSENCRYPT_CHAIN:-}" ] && [ "$LETSENCRYPT_CHAIN" != default ]; then
+  ISSUE_ARGS+=(--preferred-chain "$LETSENCRYPT_CHAIN")
+fi
+if [ "${TESTING:-false}" = true ]; then
+  ISSUE_ARGS+=(--test-cert)
+  if [ -n "${KUBERNETES_SECRET:-}" ] && [[ "$KUBERNETES_SECRET" != *-staging ]]; then
+    fail "TESTING=true requires a KUBERNETES_SECRET ending in -staging (or no Kubernetes Secret)"
+  fi
+fi
 
-  echo "INFO: Attempting SSL certificate renewal"
-  certbot renew
-  chown -R $UID:$GID /etc/letsencrypt
+echo "INFO: Issuing certificate for $DOMAIN using $DNS_PROVIDER (staging=${TESTING:-false})"
+certbot certonly "${CERTBOT_ARGS[@]}" "${AUTH_ARGS[@]}" "${ISSUE_ARGS[@]}" "${DOMAIN_ARGS[@]}"
+
+CERT_DIR="$CONFIG_DIR/live/$DOMAIN"
+publish_certificate() {
+  [ -s "$CERT_DIR/fullchain.pem" ] && [ -s "$CERT_DIR/privkey.pem" ] ||
+    fail "Certificate files are missing in $CERT_DIR"
+  chown -R "$OWNER_UID:$OWNER_GID" "$CONFIG_DIR"
+  if [ -n "${KUBERNETES_SECRET:-}" ]; then
+    echo "INFO: Updating Kubernetes Secret $KUBERNETES_SECRET"
+    "$KUBECTL" create secret tls "$KUBERNETES_SECRET" \
+      --save-config \
+      --cert="$CERT_DIR/fullchain.pem" \
+      --key="$CERT_DIR/privkey.pem" \
+      --dry-run=client -o yaml | "$KUBECTL" apply -f -
+  fi
+}
+
+publish_certificate
+while :; do
+  DELAY_SECONDS="$(($(shuf -i 1-720 -n 1) * 60))"
+  echo "INFO: Checking renewal in $DELAY_SECONDS seconds"
+  sleep "$DELAY_SECONDS"
+  # Only renew this lineage, never other providers or old domains on the volume.
+  certbot renew "${CERTBOT_ARGS[@]}" --cert-name "$DOMAIN"
+  publish_certificate
 done
